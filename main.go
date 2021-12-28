@@ -34,12 +34,17 @@ func usage() {
 	flag.PrintDefaults()
 }
 
+// cmdArgs is struct with command name and it's arguments.
+type cmdArgs struct {
+	name string
+	args []string
+}
+
 // config is the configuration for the gowatch.
 type config struct {
 	// Path is the path to watch.
 	Path string
-	// Cmd is the command to run.
-	Cmd *exec.Cmd
+	args cmdArgs
 }
 
 // initConfig initializes the configurations.
@@ -59,31 +64,22 @@ func initConfig() (config, error) {
 	if len(cmdRaw) > 1 {
 		flags = cmdRaw[1:]
 	}
-	cmd := exec.CommandContext(context.Background(), cmdName, flags...)
 
 	return config{
 		Path: entryPath,
-		Cmd:  cmd,
+		args: cmdArgs{
+			name: cmdName,
+			args: flags,
+		},
 	}, nil
 }
 
-func main() {
-	flag.Usage = usage
-	flag.Parse()
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
-
-	cfg, err := initConfig()
-	if err != nil {
-		log.Fatalf("could not start gowatch: %v", err)
-	}
-
-	cycle := time.NewTicker(1 * time.Second)
+func watcher(ctx context.Context, dirpath string, notify chan<- struct{}) {
+	cycle := time.NewTicker(time.Second)
 	defer cycle.Stop()
 
 	fileInfos := make(map[string]os.FileInfo)
-	err = filepath.WalkDir(cfg.Path, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(dirpath, func(path string, d os.DirEntry, err error) error {
 		fileInfo, err := d.Info()
 		if err != nil {
 			return fmt.Errorf("could not get %v info: %w", path, err)
@@ -104,7 +100,7 @@ func main() {
 			// TODO:: replace by own implementation to not call call recursively walk dir,
 			// because right not it's pretty junky implementation.
 			// See: path/filepath/path.go walkDir
-			filepath.WalkDir(cfg.Path, func(path string, d os.DirEntry, err error) error {
+			filepath.WalkDir(dirpath, func(path string, d os.DirEntry, err error) error {
 				fileInfo, err := d.Info()
 				if err != nil {
 					return err
@@ -122,17 +118,52 @@ func main() {
 			})
 
 			if changed {
-				changed = false
-				// make sure we can run the same command many times even if it exists
-				// it might be the case if compilation is failed for example.
-				cmd := *cfg.Cmd
-
-				out, err := cmd.Output()
-				if err != nil {
-					log.Printf("could not execute command, output: %v, err: %v", string(out), err)
-				}
-				fmt.Println(string(out))
+				go func() {
+					notify <- struct{}{}
+				}()
 			}
 		}
 	}
+}
+
+func runner(ctx context.Context, args cmdArgs, notify <-chan struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-notify:
+			cmdCtx, cancel := context.WithCancel(context.Background())
+			cmd := exec.CommandContext(cmdCtx, args.name, args.args...)
+			go func() {
+				cmd.Run()
+			}()
+
+			select {
+			case <-ctx.Done():
+				cancel()
+				return
+			case <-notify:
+				log.Printf("\nReloading...\n")
+				cancel()
+			}
+		}
+	}
+}
+
+func main() {
+	flag.Usage = usage
+	flag.Parse()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	cfg, err := initConfig()
+	if err != nil {
+		log.Fatalf("could not start gowatch: %v", err)
+	}
+
+	notify := make(chan struct{}, 1)
+
+	go watcher(ctx, cfg.Path, notify)
+	runner(ctx, cfg.args, notify)
 }
