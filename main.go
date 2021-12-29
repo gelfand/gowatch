@@ -26,7 +26,7 @@ func usage() {
 }
 
 // watcher watches the given path for changes.
-func watcher(ctx context.Context, dirpath string, notify chan<- struct{}) {
+func watcher(ctx context.Context, dirpath string, notify chan<- bool, done chan<- bool) {
 	cycle := time.NewTicker(time.Second)
 	defer cycle.Stop()
 
@@ -51,15 +51,11 @@ func watcher(ctx context.Context, dirpath string, notify chan<- struct{}) {
 			}
 			v, ok := fileInfos[path1]
 			if !ok {
-				go func() {
-					notify <- struct{}{}
-				}()
+				go func() { notify <- true }()
 				fileInfos[path1] = fileInfo
 			} else {
 				if v.Size() != fileInfo.Size() || v.ModTime() != fileInfo.ModTime() {
-					go func() {
-						notify <- struct{}{}
-					}()
+					go func() { notify <- true }()
 					fileInfos[path1] = fileInfo
 				}
 			}
@@ -69,6 +65,9 @@ func watcher(ctx context.Context, dirpath string, notify chan<- struct{}) {
 			}
 		}
 	}
+	walk(dirpath)
+	done <- true
+	close(done)
 
 	for {
 		select {
@@ -81,27 +80,50 @@ func watcher(ctx context.Context, dirpath string, notify chan<- struct{}) {
 }
 
 // runner runs the given command.
-func runner(ctx context.Context, cmdName string, args []string, notify chan struct{}) {
+func runner(ctx context.Context, cmdName string, args []string, notify chan bool, done chan bool) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-notify:
+			continue
+		case <-done:
+		}
+		break
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-notify:
 			log.Printf("\nReloading...\n")
-			cmdCtx, cancel := context.WithCancel(context.Background())
-			cmd := exec.CommandContext(cmdCtx, cmdName, args...)
-			go func() {
-				cmd.Run()
-			}()
-
-			select {
-			case <-ctx.Done():
-				cancel()
-				return
-			case <-notify:
-				go func() { notify <- struct{}{} }()
-				cancel()
+			c := exec.Command(cmdName, args...)
+			r, err := c.StdoutPipe()
+			if err != nil {
+				log.Fatalf("could not get stdout pipe: %v", err)
 			}
+			c.Start()
+
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-notify:
+						go func() { notify <- true }()
+						c.Process.Kill()
+						return
+					case <-time.Tick(1 * time.Second):
+						buf := make([]byte, 1024)
+						n, err := r.Read(buf[:])
+						if err != nil {
+							continue
+						}
+						fmt.Println(string(buf[:n]))
+					}
+				}
+			}()
 		}
 	}
 }
@@ -127,8 +149,9 @@ func main() {
 		args = cmdRaw[1:]
 	}
 
-	notify := make(chan struct{}, 1)
+	notify := make(chan bool, 1)
+	done := make(chan bool, 1)
 
-	go watcher(ctx, path, notify)
-	runner(ctx, cmdName, args, notify)
+	go watcher(ctx, path, notify, done)
+	runner(ctx, cmdName, args, notify, done)
 }

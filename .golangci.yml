@@ -1,0 +1,45 @@
+# This file contains all available configuration options
+# with their default values.
+
+# options for analysis running
+run:
+  allow-parallel-runners: false
+  deadline: 10m
+
+linters:
+  enable-all: true
+  disable: 
+    - wsl
+    - scopelint
+    - forbidigo
+    - gomnd
+    - interfacer
+    - golint
+    - maligned
+    - testpackage
+    - varnamelen
+    - varcheck
+    - nlreturn
+    - gochecknoglobals
+    - godox
+    - forcetypeassert
+    - paralleltest
+    - gochecknoinits
+    - funlen
+  fast: false
+  gocritic:
+    settings:
+        rangeExprCopy:
+          # size in bytes that makes the warning trigger (default 512)
+          sizeThreshold: 512
+          # whether to check test functions (default true)
+          skipTestFuncs: true
+
+        rangeValCopy:
+          # size in bytes that makes the warning trigger (default 128)
+          sizeThreshold: 32
+          # whether to check test functions (default true)
+          skipTestFuncs: true
+
+
+
